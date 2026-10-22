@@ -66,23 +66,64 @@ custom mapper or a software-side coordinate remap.
 
 ---
 
-## 4. ⚠️ Gotchas (address before first power-on)
+## 4. ⚠️ Assembly — what must be soldered
 
-1. **Solder the E-line jumper on the bonnet.**
-   The Adafruit bonnet does not route the `E` address line by default, but
-   **64×64 panels require it**. Bridge **GPIO 4 → pin 8 pad**. Without it only
-   half the panel lights up. This is the most common failure for 64×64 + Adafruit HAT.
+Three solder jobs. Do them in one session; only the first two are mandatory.
 
-2. **Pi 5 is NOT supported.** The library doesn't work with the Pi 5's RP1 GPIO.
-   → **`www` (Pi 5) is ruled out.**
+### 4.1 Solder the 2×20 header onto the Pi Zero W  *(required)*
 
-3. **Disable onboard audio:** add `dtparam=audio=off` to `/boot/firmware/config.txt`.
-   The onboard sound shares PWM hardware and causes flicker.
+The Zero W ships with **bare through-holes** — no pins. Nothing can be plugged
+in until a 2×20 male header is soldered on. (A "Zero **WH**" would already have
+one; ours does not.)
 
-4. **Dedicate the machine.** The driver bit-bangs GPIO and is timing-sensitive.
-   Best results with an isolated CPU core (`isolcpus=3` on a quad-core).
+![Soldering the header](img/solder-header.png)
 
----
+- Insert the header from the **top/component side** so the **long pins point UP**
+- Solder on the **underside** (the side without the black plastic spacer)
+- **Tack two opposite corners first**, confirm the header sits flat and square,
+  *then* solder the remaining 38 — straightening it afterwards is painful
+- Check for solder bridges between neighbouring pins when done
+
+No iron / not confident? A **GPIO Hammer Header** (press-fit, solderless, ~$6)
+does the same job, or any maker space will do a 40-pin header in minutes.
+
+### 4.2 Bridge the E-line jumper  *(required for 64×64)*
+
+64×64 panels use 1:32 multiplexing and need a 5th address line (`E`). Our bonnet
+is the newer type with **Address-E pads** on the underside, so this is a solder
+blob rather than a wire.
+
+![E-line jumper](img/e-line-jumper.png)
+
+Per the [library README](https://github.com/hzeller/rpi-rgb-led-matrix#64x64-with-e-line-on-adafruit-hatbonnet):
+
+> Melt a blob of solder between the center "E" pad and the "8" pad just above it
+> (for 64x64 matrices in the Adafruit shop)… *or* the "16" pad below (rare, for
+> some third-party 64x64 matrices… check datasheet).
+
+- **Start with `E → 8`.**
+- ⚠️ Our panels are **third-party** (`DCHY-P2-6464-1515-VP`), so `E → 16` is a
+  genuine possibility. If the panel lights only half, or shows duplicated
+  halves, wick the solder off and bridge `E → 16` instead.
+
+**Without this jumper only half of each 64×64 panel lights up** — the single most
+common failure for 64×64 + Adafruit HAT.
+
+### 4.3 Flicker mod: wire GPIO 4 ↔ GPIO 18  *(strongly recommended here)*
+
+Solder a short wire between GPIO 4 and GPIO 18, then run with
+`--led-gpio-mapping=adafruit-hat-pwm`. This enables hardware PWM and noticeably
+reduces flicker.
+
+**Worth doing on a Zero W specifically** — flicker is exactly the weak point of a
+single-core ARMv6 driving 12,288 pixels, so this buys back real headroom.
+
+### 4.4 Software-side prerequisites
+
+1. **Pi 5 is NOT supported** (RP1 GPIO) → `www` is ruled out
+2. **Disable onboard audio**: `dtparam=audio=off` in `/boot/firmware/config.txt`
+   — onboard sound shares the PWM hardware and causes flicker
+3. **Dedicate the machine** — the driver bit-bangs GPIO and is timing-sensitive
 
 ## 5. Host selection
 
@@ -91,9 +132,9 @@ custom mapper or a software-side coordinate remap.
 | `www` (192.168.1.112) | **Pi 5** | ❌ library unsupported |
 | `pi` (192.168.1.134) | Pi 4B Rev 1.4 | ❌ runs Homebridge / garage door — don't add timing-critical GPIO work |
 | `pi2` (192.168.1.113) | Pi 4B Rev 1.2 | ❌ CI host — build bursts would cause flicker |
-| **Pi Zero** | **TBD** | ⏳ **pending — Rax to confirm model** |
+| **Pi Zero W** (`zero`, 192.168.1.209) | **BCM2835, ARMv6 single-core** | ⚠️ **confirmed** — usable, but at the edge for 3 panels |
 
-### Pi Zero feasibility (pending confirmation)
+### Pi Zero W feasibility (confirmed)
 The library bit-bangs GPIO, so refresh rate scales with CPU. 3 chained
 64×64 panels = **12,288 pixels**.
 
@@ -102,13 +143,28 @@ The library bit-bangs GPIO, so refresh rate scales with CPU. 3 chained
 | Pi Zero / Zero W (BCM2835, **single-core ARMv6**) | ⚠️ Marginal — expect flicker / low refresh. Mitigate with `--led-pwm-bits=7`, `--led-slowdown-gpio=0..1` (costs color depth) |
 | **Pi Zero 2 W** (BCM2710, **quad-core A53**) | ✅ Workable (~Pi 3 class) with tuning |
 
-> Check with: `cat /proc/cpuinfo | grep -i model` on the Zero.
+**Confirmed 2026-10-22** — `Raspberry Pi Zero W Rev 1.1`, `BCM2835`,
+`ARMv6-compatible processor rev 7 (v6l)`, kernel `6.6.74+rpt-rpi-v6` (32-bit).
+So we are in the *constrained* case.
 
-**Note:** driving the 3 panels as *three independent 64×64 displays* is far
-lighter on CPU than one 192-long chain — a viable fallback for a weaker Zero.
+⚠️ **Correction to an earlier note:** driving the panels as *three independent
+displays* is **not possible with this bonnet**. The Adafruit Bonnet wires only
+one set of RGB/clock pins, so it supports a **single chain**
+(`--led-parallel=1`); parallel chains need the plain GPIO mapping with more pins
+broken out. The README confirms it "only allows for a single chain". The CPU has
+to carry all three panels — there is no escape hatch for a slow core.
 
-**Conclusion:** a **dedicated** board is the right pattern. Pi Zero 2 W, or a
-cheap dedicated Pi 3A+/Pi 4.
+**Mitigations for the Zero W:**
+- `--led-pwm-bits=7` (down from 11) — trades colour depth for refresh rate.
+  Fine for solid-colour **text and emoji**; poor for photos/gradients.
+- `--led-slowdown-gpio=0` — the README explicitly recommends `0` for
+  "Model A, A+, B+, **Zero**"
+- Do the **4↔18 flicker mod** (§4.3)
+
+**Recommended approach: test, don't guess.** Wire up **one** panel first and
+judge the flicker by eye, then add the 2nd and 3rd. If it is not acceptable, a
+**Zero 2 W (~$15)** is a drop-in replacement — same form factor and GPIO,
+quad-core A53 — and still far better than tying up `pi` (garage door) or `pi2` (CI).
 
 ---
 
@@ -140,9 +196,22 @@ soldering, power supply and host selection are still being sorted.
 
 ## 7. Open items
 
-- [ ] Confirm Pi Zero model (Rax) → decides host + whether chaining or 3 independent panels
-- [ ] Solder E-line jumper (GPIO 4 → pin 8) on the bonnet
-- [ ] Source 5 V 10–15 A PSU
+### Assembly (Rax)
+- [ ] Solder 2×20 male header to the Pi Zero W — §4.1
+- [ ] Bridge E-line jumper `E → 8` — §4.2
+- [ ] Flicker mod: wire GPIO 4 ↔ 18 — §4.3
+- [ ] Source **5 V 10–15 A** PSU for the panels (never power them from the Pi)
+
+### Bring-up
+- [ ] Deploy SSH key to `zero` (192.168.1.209) so the build can be driven remotely
+- [ ] Build `rpi-rgb-led-matrix` on the Zero (slow on ARMv6 — can start before soldering is done)
+- [ ] `dtparam=audio=off` in `/boot/firmware/config.txt`
+- [ ] **Test with ONE panel first**, then add 2nd and 3rd:
+      `--led-rows=64 --led-cols=64 --led-chain=1 --led-gpio-mapping=adafruit-hat-pwm --led-slowdown-gpio=0`
+- [ ] Judge flicker → decide whether the Zero W is good enough or a Zero 2 W is needed
 - [ ] Decide chain wiring order for the 64×192 portrait arrangement
-- [ ] Build browser designer/simulator
-- [ ] Build Pi runtime + push pipeline
+
+### App
+- [ ] Build browser designer/simulator (hardware-independent — not blocked by any of the above)
+- [ ] Build Pi runtime + "send to Pi" pipeline
+- [ ] Panel-mapping layer (64×192 / 192×64 / L-shape)
