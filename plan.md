@@ -95,6 +95,14 @@ blob rather than a wire.
 
 ![E-line jumper](img/e-line-jumper.png)
 
+The three pads sit **side by side** (not stacked) on the bonnet's underside,
+just above the `OE` test-point block. They are the only group of three bare gold
+rectangles on the board. On our actual bonnet:
+
+![E pads on the real board](img/e-line-actual-board.png)
+
+`16` = left pad · `E` = centre pad (circled **E** label below it) · `8` = right pad.
+
 Per the [library README](https://github.com/hzeller/rpi-rgb-led-matrix#64x64-with-e-line-on-adafruit-hatbonnet):
 
 > Melt a blob of solder between the center "E" pad and the "8" pad just above it
