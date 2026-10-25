@@ -117,14 +117,54 @@ Per the [library README](https://github.com/hzeller/rpi-rgb-led-matrix#64x64-wit
 **Without this jumper only half of each 64×64 panel lights up** — the single most
 common failure for 64×64 + Adafruit HAT.
 
-### 4.3 Flicker mod: wire GPIO 4 ↔ GPIO 18  *(strongly recommended here)*
+### 4.3 Flicker mod: bridge GPIO 4 &harr; GPIO 18  *(strongly recommended here)*
 
-Solder a short wire between GPIO 4 and GPIO 18, then run with
-`--led-gpio-mapping=adafruit-hat-pwm`. This enables hardware PWM and noticeably
-reduces flicker.
+![4 to 18 flicker mod](img/flicker-mod-4-18.svg)
 
-**Worth doing on a Zero W specifically** — flicker is exactly the weak point of a
-single-core ARMv6 driving 12,288 pixels, so this buys back real headroom.
+![The two holes on our actual bonnet](img/flicker-mod-bonnet-photo.jpg)
+
+> ⚠️ **Not to be confused with the `E → 8` jumper (§4.2).** That one is solder
+> *pads on the bonnet's underside* and is already done. This one is a *wire
+> between breakout holes on the top*. The "8" in `E → 8` is a pad name, not a
+> GPIO. **GPIO 8 is not involved in this mod at all.**
+
+**Why it works.** The bonnet drives the panels' **OE** (output-enable) line from
+**GPIO 4**. OE is what gates each row on and off, so any jitter in its timing
+shows up directly as visible flicker. GPIO 4 has no hardware-PWM capability, so
+the library has to toggle it in software, at the mercy of scheduling on a
+single-core ARMv6. **GPIO 18 is one of the Pi's hardware PWM pins** and is left
+**unused** by the bonnet. Wiring them together lets the library hand OE timing to
+the PWM peripheral, which is jitter-free regardless of CPU load.
+
+**Confirmed on our board:** the breakout row reads
+`SDA 2 | SCL 3 | TX 14 | RX 15 | OE 4 | CLK 17 | (blank) 18 | C 27 | A 22 | B2 23 | E 24 | 25`.
+GPIO 18 carries **no function label**, confirming it is free &mdash; that is what
+makes the bridge safe.
+
+**Do it:**
+1. Power off &mdash; unplug both the panel PSU and the Pi.
+2. Lift the bonnet off the Pi so the pads are reachable.
+3. Solder one short wire (30 AWG is plenty) between the hole marked **`OE` / `4`**
+   and the hole marked **`18`**. Identify them by the **silkscreen text**, not by
+   position in a photo.
+4. Inspect for a bridge to **`CLK` / `17`**, the hole physically between the two
+   (the three run in a straight line: `OE 4` &rarr; `CLK 17` &rarr; `18`).
+   Shorting CLK to OE will stop the display working entirely.
+5. Reassemble and run with `--led-gpio-mapping=adafruit-hat-pwm`.
+
+> The wire alone does nothing. The GPIO mapping **must** change from
+> `adafruit-hat` to `adafruit-hat-pwm`, or the library keeps bit-banging GPIO 4
+> and ignores the new path.
+
+**What to expect.** This does **not** raise the refresh rate much &mdash; we measured
+~44 Hz at full 11-bit depth and that is a CPU ceiling. What it removes is the
+*jitter*, which is what makes a low refresh rate read as flicker. If it is still
+not good enough afterwards, the honest fix is a **Zero 2 W (~$15)**: same form
+factor and GPIO, quad-core.
+
+**Alternative location:** the same two signals appear on the Pi's 40-pin header as
+**physical pin 7 (GPIO 4)** and **physical pin 12 (GPIO 18)** &mdash; only relevant if
+you would rather solder on the Pi than the bonnet.
 
 ### 4.4 Software-side prerequisites
 
@@ -148,7 +188,7 @@ The library bit-bangs GPIO, so refresh rate scales with CPU. 3 chained
 
 | Model | Verdict for 3 panels |
 |---|---|
-| Pi Zero / Zero W (BCM2835, **single-core ARMv6**) | ⚠️ Marginal — expect flicker / low refresh. Mitigate with `--led-pwm-bits=7`, `--led-slowdown-gpio=0..1` (costs color depth) |
+| Pi Zero / Zero W (BCM2835, **single-core ARMv6**) | ⚠️ Marginal — expect flicker / low refresh. Measured ~44-50 Hz with 3 panels (see below) - usable but flickery |
 | **Pi Zero 2 W** (BCM2710, **quad-core A53**) | ✅ Workable (~Pi 3 class) with tuning |
 
 **Confirmed 2026-10-22** — `Raspberry Pi Zero W Rev 1.1`, `BCM2835`,
@@ -162,12 +202,73 @@ one set of RGB/clock pins, so it supports a **single chain**
 broken out. The README confirms it "only allows for a single chain". The CPU has
 to carry all three panels — there is no escape hatch for a slow core.
 
+### ✅ Chain fully working — 2026-10-24
+
+All three panels lit R/G/B via `examples-api-use/panel-id.cc` (segment 0 = RED,
+1 = GREEN, 2 = BLUE). **Chain order matches the library's expectation**: segment 0
+is the panel wired to the bonnet, and order runs left-to-right with no remap.
+
+**Root cause of the two dark panels: missing 5 V.** Each 64x64 panel has its own
+`+5V`/`GND` header; they are **not** powered through the HUB75 ribbon. Only the
+first panel's header was connected. Data was reaching panels 2 and 3 the whole
+time. The E jumper, chain wiring (OUT -> IN) and software were never at fault.
+
+> ⚠️ Give each panel its **own** pair of leads from the PSU. Do not feed three
+> panels through the bonnet's screw terminal — ~12 A at full white is far beyond
+> what that terminal and the bonnet traces are rated for. The terminal powers the
+> Pi/bonnet only.
+
+#### Canvas orientation
+
+| Config | Flags | Canvas |
+|---|---|---|
+| **Landscape (native)** | `--led-chain=3` | **192 x 64** |
+| Portrait | `--led-chain=3 --led-pixel-mapper='Rotate:90'` | 64 x 192 |
+
+Both verified on hardware. The mapper cannot move panels: `Rotate:90` is correct
+**only once the panels are physically stacked vertically**. With them in a row,
+192 x 64 is the native arrangement. **Orientation is a mounting decision.**
+
+#### Not bugs
+
+- **`demo -D 0`'s square looks clipped at 45 deg** — it centres a 64x64 rotating
+  square on a 64-tall canvas, so the corners sweep outside and clip. Expected.
+- **Horizontal banding in photographs** — camera rolling shutter vs 1/32
+  multiplexing (only 2 of 64 rows lit at any instant). Looks solid to the eye.
+
+### Measured on hardware — 2026-10-24 ✅
+
+Driver built, panels driving. (Panel 2 photographed lit; whether all three
+light is **still to be confirmed by eye** — `demo -D 0` only draws a centred
+64×64 square, so panels 1 and 3 being dark in that test was expected, not a
+fault.) Measured on the real rig
+(`demo -D 4`, full 192×64 canvas, `--led-slowdown-gpio=0`, brightness 60):
+
+| `--led-pwm-bits` | Refresh |
+|---|---|
+| 7 | **50.1 Hz** |
+| 9 | 46.6 Hz |
+| **11 (full depth)** | **44.1 Hz** |
+
+**Full 11-bit colour costs only ~12% refresh.** The Zero W is bottlenecked by
+GPIO bit-banging, *not* PWM depth — so the planned "drop to `--led-pwm-bits=7`
+for text/emoji" trade-off is **not needed**. Run full depth; photos and
+gradients stay on the table.
+
+The real constraint is the absolute rate: **~45 Hz is visibly flickery**, and
+it is stable (no dropouts over 30 s), so it is a hard CPU ceiling rather than a
+transient.
+
 **Mitigations for the Zero W:**
-- `--led-pwm-bits=7` (down from 11) — trades colour depth for refresh rate.
-  Fine for solid-colour **text and emoji**; poor for photos/gradients.
 - `--led-slowdown-gpio=0` — the README explicitly recommends `0` for
   "Model A, A+, B+, **Zero**"
-- Do the **4↔18 flicker mod** (§4.3)
+- Do the **4↔18 flicker mod** (§4.3) and switch to
+  `--led-gpio-mapping=adafruit-hat-pwm`. It will not raise the refresh rate
+  much, but it moves OE timing onto hardware PWM, removing the *jitter* that
+  makes a low refresh rate look worse than it is. **This is now the single
+  highest-value remaining change.**
+- If flicker is still unacceptable after the mod, a **Zero 2 W (~$15)** is a
+  drop-in replacement (same form factor and GPIO, quad-core A53).
 
 **Recommended approach: test, don't guess.** Wire up **one** panel first and
 judge the flicker by eye, then add the 2nd and 3rd. If it is not acceptable, a
@@ -205,19 +306,20 @@ soldering, power supply and host selection are still being sorted.
 ## 7. Open items
 
 ### Assembly (Rax)
-- [ ] Solder 2×20 male header to the Pi Zero W — §4.1
-- [ ] Bridge E-line jumper `E → 8` — §4.2
-- [ ] Flicker mod: wire GPIO 4 ↔ 18 — §4.3
-- [ ] Source **5 V 10–15 A** PSU for the panels (never power them from the Pi)
+- [x] Solder 2×20 male header to the Pi Zero W — §4.1
+- [x] Bridge E-line jumper `E → 8` — §4.2 (no half-panel/duplicated-half symptom, so `E → 8` is correct for our third-party panels — `E → 16` not needed)
+- [ ] **Flicker mod: wire GPIO 4 ↔ 18 — §4.3 — now the top priority** (then `--led-gpio-mapping=adafruit-hat-pwm`)
+- [x] Each panel fed its own 5 V leads — this was the cause of the dark panels
+- [ ] Confirm the PSU is rated **5 V 10–15 A** for all three at full white
 
 ### Bring-up
-- [ ] Deploy SSH key to `zero` (192.168.1.209) so the build can be driven remotely
-- [ ] Build `rpi-rgb-led-matrix` on the Zero (slow on ARMv6 — can start before soldering is done)
-- [ ] `dtparam=audio=off` in `/boot/firmware/config.txt`
-- [ ] **Test with ONE panel first**, then add 2nd and 3rd:
-      `--led-rows=64 --led-cols=64 --led-chain=1 --led-gpio-mapping=adafruit-hat-pwm --led-slowdown-gpio=0`
-- [ ] Judge flicker → decide whether the Zero W is good enough or a Zero 2 W is needed
-- [ ] Decide chain wiring order for the 64×192 portrait arrangement
+- [x] Deploy SSH key to `zero` (192.168.1.209) so the build can be driven remotely
+- [x] Build `rpi-rgb-led-matrix` on the Zero. (`text-example` first appeared to fail; it was **killed by a reboot mid-build**, not OOM — no `oom-kill` in `dmesg` and the 512 MB swap was untouched. Rebuilt cleanly. A full build takes several minutes on ARMv6 — run it detached.)
+- [x] `dtparam=audio=off` in `/boot/firmware/config.txt` + `snd_bcm2835` blacklisted (verified unloaded after reboot)
+- [x] All 3 panels verified lit and in correct chain order (`panel-id` R/G/B test)
+- [ ] Judge flicker **after** the 4↔18 mod → Zero W good enough, or move to a Zero 2 W
+- [x] Chain order confirmed correct as wired (segment 0 = panel at the bonnet)
+- [ ] **Decide mounting: row (192×64, native) vs vertical stack (64×192, needs `Rotate:90`)**
 
 ### App
 - [ ] Build browser designer/simulator (hardware-independent — not blocked by any of the above)
